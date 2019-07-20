@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#if _WIN32
+#ifdef _WIN32
 typedef SOCKET dyad_Socket;
 #else
 typedef int dyad_Socket;
@@ -99,6 +99,7 @@ int  dyad_getPort(dyad_Stream *stream);
 int  dyad_getBytesSent(dyad_Stream *stream);
 int  dyad_getBytesReceived(dyad_Stream *stream);
 dyad_Socket dyad_getSocket(dyad_Stream *stream);
+int dyad_win32EnableFastLoopbackPath(dyad_Stream *stream);
 
 #ifdef __cplusplus
 } // extern "C"

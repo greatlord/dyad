@@ -12,6 +12,8 @@
   #endif
   #include <winsock2.h>
   #include <ws2tcpip.h>
+  #include <mstcpip.h>
+  #include "inc/missing_from_mstcpip.h"
   #include <windows.h>
 #else
   #define _POSIX_C_SOURCE 200809L
@@ -38,7 +40,7 @@
 #include <limits.h>
 #include <stddef.h>
 
-#include "dyad.h"
+#include "inc/dyad.h"
 
 #define DYAD_VERSION "0.2.1"
 
@@ -68,7 +70,7 @@
     } else {
       memcpy(&addr.sai.sin_addr, src, sizeof(addr.sai.sin_addr));
     }
-    res = WSAAddressToStringA(&addr.sa, sizeof(addr), 0, dst, (LPDWORD) &size);
+    res = WSAAddressToString(&addr.sa, sizeof(addr), 0, dst, (LPDWORD) &size);
     if (res != 0) return NULL;
     return dst;
   }
@@ -94,9 +96,7 @@ static void *dyad_realloc(void *ptr, int n) {
 }
 
 
-static void dyad_free(void *ptr) {
-  free(ptr);
-}
+
 
 
 /*===========================================================================*/
@@ -110,7 +110,7 @@ static void vec_expand(char **data, int *length, int *capacity, int memsz) {
     } else {
       *capacity <<= 1;
     }
-    *data = dyad_realloc(*data, *capacity * memsz);
+    *data = (char*) dyad_realloc(*data, *capacity * memsz);
   }
 }
 
@@ -137,7 +137,7 @@ static void vec_splice(
 
 
 #define vec_deinit(v)\
-  dyad_free((v)->data)
+  free((v)->data)
 
 
 #define vec_clear(v)\
@@ -192,7 +192,7 @@ typedef struct {
 static void select_deinit(SelectSet *s) {
   int i;
   for (i = 0; i < SELECT_MAX; i++) {
-    dyad_free(s->fds[i]);
+    free(s->fds[i]);
     s->fds[i] = NULL;
   }
   s->capacity = 0;
@@ -204,7 +204,7 @@ static void select_grow(SelectSet *s) {
   int oldCapacity = s->capacity;
   s->capacity = s->capacity ? s->capacity << 1 : 1;
   for (i = 0; i < SELECT_MAX; i++) {
-    s->fds[i] = dyad_realloc(s->fds[i], s->capacity * sizeof(fd_set));
+    s->fds[i] = (fd_set*) dyad_realloc(s->fds[i], s->capacity * sizeof(fd_set));
     memset(s->fds[i] + oldCapacity, 0,
            (s->capacity - oldCapacity) * sizeof(fd_set));
   }
@@ -216,7 +216,7 @@ static void select_zero(SelectSet *s) {
   if (s->capacity == 0) return;
   s->maxfd = 0;
   for (i = 0; i < SELECT_MAX; i++) {
-#if _WIN32
+#ifdef _WIN32
     s->fds[i]->fd_count = 0;
 #else
     memset(s->fds[i], 0, s->capacity * sizeof(fd_set));
@@ -288,6 +288,9 @@ struct dyad_Stream {
   Vec(Listener) listeners;
   Vec(char) lineBuffer;
   Vec(char) writeBuffer;
+#ifdef _WIN32
+  int win32FastLoopbackPathEnabled;
+#endif
   dyad_Stream *next;
 };
 
@@ -410,8 +413,8 @@ static void stream_destroy(dyad_Stream *stream) {
   vec_deinit(&stream->listeners);
   vec_deinit(&stream->lineBuffer);
   vec_deinit(&stream->writeBuffer);
-  dyad_free(stream->address);
-  dyad_free(stream);
+  free(stream->address);
+  free(stream);
 }
 
 
@@ -453,7 +456,7 @@ static void stream_initAddress(dyad_Stream *stream) {
   socklen_t size;
   memset(&addr, 0, sizeof(addr));
   size = sizeof(addr);
-  dyad_free(stream->address);
+  free(stream->address);
   stream->address = NULL;
   if (getpeername(stream->sockfd, &addr.sa, &size) == -1) {
     if (getsockname(stream->sockfd, &addr.sa, &size) == -1) {
@@ -461,12 +464,12 @@ static void stream_initAddress(dyad_Stream *stream) {
     }
   }
   if (addr.sas.ss_family == AF_INET6) {
-    stream->address = dyad_realloc(NULL, INET6_ADDRSTRLEN);
+    stream->address = (char*)dyad_realloc(NULL, INET6_ADDRSTRLEN);
     inet_ntop(AF_INET6, &addr.sai6.sin6_addr, stream->address,
               INET6_ADDRSTRLEN);
     stream->port = ntohs(addr.sai6.sin6_port);
   } else {
-    stream->address = dyad_realloc(NULL, INET_ADDRSTRLEN);
+    stream->address = (char*)dyad_realloc(NULL, INET_ADDRSTRLEN);
     inet_ntop(AF_INET, &addr.sai.sin_addr, stream->address, INET_ADDRSTRLEN);
     stream->port = ntohs(addr.sai.sin_port);
   }
@@ -491,6 +494,38 @@ static void stream_setSocket(dyad_Stream *stream, dyad_Socket sockfd) {
   stream_initAddress(stream);
 }
 
+#ifdef _WIN32
+static int win32EnableFastLoopbackPath(dyad_Socket socket) {
+  int optionValue = 1;
+  DWORD numberOfBytesReturned = 0;
+
+  int status = WSAIoctl(
+    socket,
+    SIO_LOOPBACK_FAST_PATH,
+    &optionValue,
+    sizeof(optionValue),
+    NULL,
+    0,
+    &numberOfBytesReturned,
+    0,
+    0);
+
+  if (status == SOCKET_ERROR) {
+    DWORD lastError = GetLastError();
+
+    if (lastError == WSAEOPNOTSUPP) {
+      /* Not supported on current Windows version. */
+      return -2;
+    }
+    else {
+      return -1;
+
+    }
+  }
+  return 0;
+}
+#endif
+
 
 static int stream_initSocket(
   dyad_Stream *stream, int domain, int type, int protocol
@@ -501,6 +536,12 @@ static int stream_initSocket(
     return -1;
   }
   stream_setSocket(stream, stream->sockfd);
+  #ifdef _WIN32
+if (stream->win32FastLoopbackPathEnabled) {
+    int status = win32EnableFastLoopbackPath(stream->sockfd);
+    return status;
+  }
+#endif
   return 0;
 }
 
@@ -757,8 +798,13 @@ void dyad_update(void) {
           int optval = 0;
           socklen_t optlen = sizeof(optval);
           dyad_Event e;
+
           getsockopt(stream->sockfd, SOL_SOCKET, SO_ERROR, &optval, &optlen);
-          if (optval != 0) goto connectFailed;
+          if (optval != 0) {
+            stream_error(stream, "could not connect to server", 0);
+            break;
+          }
+
           /* Handle succeselful connection */
           stream->state = DYAD_STATE_CONNECTED;
           stream->lastActivity = dyad_getTime();
@@ -767,11 +813,8 @@ void dyad_update(void) {
           e = createEvent(DYAD_EVENT_CONNECT);
           e.msg = "connected to server";
           stream_emitEvent(stream, &e);
-        } else if (
-          select_has(&dyad_selectSet, SELECT_EXCEPT, stream->sockfd)
-        ) {
+        } else if ( select_has(&dyad_selectSet, SELECT_EXCEPT, stream->sockfd)) {
           /* Handle failed connection */
-connectFailed:
           stream_error(stream, "could not connect to server", 0);
         }
         break;
@@ -870,11 +913,15 @@ dyad_PanicCallback dyad_atPanic(dyad_PanicCallback func) {
 /*---------------------------------------------------------------------------*/
 
 dyad_Stream *dyad_newStream(void) {
-  dyad_Stream *stream = dyad_realloc(NULL, sizeof(*stream));
+  dyad_Stream *stream = (dyad_Stream*) dyad_realloc(NULL, sizeof(*stream));
   memset(stream, 0, sizeof(*stream));
   stream->state = DYAD_STATE_CLOSED;
   stream->sockfd = INVALID_SOCKET;
   stream->lastActivity = dyad_getTime();
+#ifdef _WIN32
+  stream->win32FastLoopbackPathEnabled = 0;
+#endif
+
   /* Add to list and increment count */
   stream->next = dyad_streams;
   dyad_streams = stream;
@@ -960,45 +1007,73 @@ int dyad_listenEx(
 
   /* Get addrinfo */
   memset(&hints, 0, sizeof(hints));
+#ifdef _WIN32
+  hints.ai_family = AF_INET;
+  //   hints.ai_family = AF_UNSPEC;
+#else
   hints.ai_family = AF_UNSPEC;
+#endif
+
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE;
   sprintf(buf, "%d", port);
   err = getaddrinfo(host, buf, &hints, &ai);
   if (err) {
+
     stream_error(stream, "could not get addrinfo", errno);
-    goto fail;
+
+  } else {
+
+    /* Init socket */
+    err = stream_initSocket(stream, ai->ai_family, ai->ai_socktype,
+                            ai->ai_protocol);
+    if (err) {
+
+      // todo erro msg
+
+    } else {
+
+      /* Set SO_REUSEADDR so that the socket can be immediately bound without
+      * having to wait for any closed socket on the same port to timeout */
+
+      optval = 1;
+
+      setsockopt(stream->sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+      /* Bind and listen */
+      err = bind(stream->sockfd, ai->ai_addr, ai->ai_addrlen);
+      if (err) {
+
+        stream_error(stream, "could not bind socket", errno);
+
+      } else {
+
+        err = listen(stream->sockfd, backlog);
+
+        if (err) {
+
+          stream_error(stream, "socket failed on listen", errno);
+
+        } else {
+
+          stream->state = DYAD_STATE_LISTENING;
+          stream->port = port;
+          stream_initAddress(stream);
+          /* Emit listening event */
+          e = createEvent(DYAD_EVENT_LISTEN);
+          e.msg = "socket is listening";
+          stream_emitEvent(stream, &e);
+          freeaddrinfo(ai);
+          return 0;
+        }
+
+      }
+
+    }
+
   }
-  /* Init socket */
-  err = stream_initSocket(stream, ai->ai_family, ai->ai_socktype,
-                          ai->ai_protocol);
-  if (err) goto fail;
-  /* Set SO_REUSEADDR so that the socket can be immediately bound without
-   * having to wait for any closed socket on the same port to timeout */
-  optval = 1;
-  setsockopt(stream->sockfd, SOL_SOCKET, SO_REUSEADDR,
-             &optval, sizeof(optval));
-  /* Bind and listen */
-  err = bind(stream->sockfd, ai->ai_addr, ai->ai_addrlen);
-  if (err) {
-    stream_error(stream, "could not bind socket", errno);
-    goto fail;
-  }
-  err = listen(stream->sockfd, backlog);
-  if (err) {
-    stream_error(stream, "socket failed on listen", errno);
-    goto fail;
-  }
-  stream->state = DYAD_STATE_LISTENING;
-  stream->port = port;
-  stream_initAddress(stream);
-  /* Emit listening event */
-  e = createEvent(DYAD_EVENT_LISTEN);
-  e.msg = "socket is listening";
-  stream_emitEvent(stream, &e);
-  freeaddrinfo(ai);
-  return 0;
-  fail:
+
+  // fail
   if (ai) freeaddrinfo(ai);
   return -1;
 }
@@ -1016,7 +1091,13 @@ int dyad_connect(dyad_Stream *stream, const char *host, int port) {
 
   /* Resolve host */
   memset(&hints, 0, sizeof(hints));
+#ifdef _WIN32
+  hints.ai_family = AF_INET;
+  //hints.ai_family = AF_UNSPEC;
+#else
   hints.ai_family = AF_UNSPEC;
+#endif
+
   hints.ai_socktype = SOCK_STREAM;
   sprintf(buf, "%d", port);
   err = getaddrinfo(host, buf, &hints, &ai);
@@ -1027,7 +1108,9 @@ int dyad_connect(dyad_Stream *stream, const char *host, int port) {
   /* Start connecting */
   err = stream_initSocket(stream, ai->ai_family, ai->ai_socktype,
                           ai->ai_protocol);
-  if (err) goto fail;
+  if (err) {
+    goto fail;
+  }
   connect(stream->sockfd, ai->ai_addr, ai->ai_addrlen);
   stream->state = DYAD_STATE_CONNECTING;
   freeaddrinfo(ai);
@@ -1068,7 +1151,7 @@ fail:
 }
 
 void dyad_write(dyad_Stream *stream, const void *data, int size) {
-  const char *p = data;
+  const char *p = (const char*) data;
   while (size--) {
     vec_push(&stream->writeBuffer, *p++);
   }
@@ -1184,4 +1267,14 @@ int dyad_getBytesReceived(dyad_Stream *stream) {
 
 dyad_Socket dyad_getSocket(dyad_Stream *stream) {
   return stream->sockfd;
+}
+
+int dyad_win32EnableFastLoopbackPath(dyad_Stream *stream) {
+#ifdef _WIN32
+  /* TODO: check if the feature is supported to allow for early failure */
+  stream->win32FastLoopbackPathEnabled = 1;
+  return 0;
+#else
+  return -1;
+#endif
 }
