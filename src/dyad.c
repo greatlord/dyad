@@ -10,6 +10,8 @@
   #ifndef _CRT_SECURE_NO_WARNINGS
     #define _CRT_SECURE_NO_WARNINGS
   #endif
+  #define _WINSOCK_DEPRECATED_NO_WARNINGS
+
   #include <winsock2.h>
   #include <ws2tcpip.h>
   #include <mstcpip.h>

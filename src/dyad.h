@@ -11,6 +11,7 @@
 #include <stdarg.h>
 
 #ifdef _WIN32
+#undef UNICODE
   #include <windows.h> /* For SOCKET */
 #endif
 
