@@ -13,7 +13,7 @@
   #include <winsock2.h>
   #include <ws2tcpip.h>
   #include <mstcpip.h>
-  #include "inc/missing_from_mstcpip.h"
+ // #include "inc/missing_from_mstcpip.h"
   #include <windows.h>
 #else
   #define _POSIX_C_SOURCE 200809L
@@ -40,7 +40,7 @@
 #include <limits.h>
 #include <stddef.h>
 
-#include "inc/dyad.h"
+#include "dyad.h"
 
 #define DYAD_VERSION "0.2.1"
 
@@ -88,10 +88,22 @@
 static void panic(const char *fmt, ...);
 
 static void *dyad_realloc(void *ptr, int n) {
-  ptr = realloc(ptr, n);
-  if (!ptr && n != 0) {
-    panic("out of memory");
-  }
+	
+	void *ptr_new;
+
+	if (ptr != 0) {
+		
+		ptr_new = realloc(ptr, n);
+		if (!ptr_new && n != 0) {
+			panic("out of memory");
+			free(ptr);
+			ptr = 0;
+		}
+		else {
+			ptr = ptr_new;
+		}
+	}
+
   return ptr;
 }
 
