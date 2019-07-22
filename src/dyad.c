@@ -93,17 +93,16 @@ static void *dyad_realloc(void *ptr, int n) {
 	
 	void *ptr_new;
 
-	if (ptr != 0) {
-		
-		ptr_new = realloc(ptr, n);
-		if (!ptr_new && n != 0) {
-			panic("out of memory");
-			free(ptr);
-			ptr = 0;
-		}
-		else {
-			ptr = ptr_new;
-		}
+  // note using realloc as malloc as well
+	ptr_new = realloc(ptr, n);
+	if (!ptr_new && n != 0) {
+		panic("out of memory");
+		free(ptr);
+		ptr = 0;
+	}
+	else {
+		ptr = ptr_new;
+	
 	}
 
   return ptr;
